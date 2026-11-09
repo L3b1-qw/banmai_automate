@@ -10,18 +10,15 @@ function lsSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)) } catch (_) {}
 }
 
-// ── State ───────────────────────────────────────────────────────────────────
-// activeTab: 'register' | 'history'
-const activeTab = ref('register')
-
-// registerView on mobile: 'scan' | 'product' | 'manual' | 'cart'
-const mobileView = ref('scan')
+// ── Navigation & Views ──────────────────────────────────────────────────────
+// currentTab: 'register' | 'cart' | 'history'
+const currentTab = ref('register')
 
 // Modals
 const showPaymentModal = ref(false)
 const showReceiptModal = ref(false)
 
-// Data state
+// Data State
 const error         = ref('')
 const product       = ref(null)
 const cart          = ref(ls('pos_cart', []))
@@ -43,6 +40,8 @@ const cameraReady     = ref(false)
 const decoding        = ref(false)
 const scanError       = ref('')
 const isDragOver      = ref(false)
+const torchOn         = ref(false)
+const torchAvailable  = ref(false)
 
 // Payment
 const TAX_RATE     = 0.07 // 7% VAT
@@ -115,6 +114,8 @@ async function openCamera() {
   capturedDataUrl.value = ''
   cameraReady.value = false
   isCameraActive.value = true
+  torchOn.value = false
+  torchAvailable.value = false
 
   await nextTick()
   try {
@@ -129,12 +130,35 @@ async function openCamera() {
       videoRef.value.srcObject = stream
       videoRef.value.onloadedmetadata = () => {
         cameraReady.value = true
+        checkTorchSupport()
       }
     }
   } catch (e) {
     error.value = `Camera access denied or unavailable: ${e.message}`
     isCameraActive.value = false
   }
+}
+
+function checkTorchSupport() {
+  try {
+    const track = stream?.getVideoTracks()[0]
+    const capabilities = track?.getCapabilities?.() || {}
+    torchAvailable.value = !!capabilities.torch
+  } catch (_) {
+    torchAvailable.value = false
+  }
+}
+
+async function toggleTorch() {
+  try {
+    const track = stream?.getVideoTracks()[0]
+    if (track && torchAvailable.value) {
+      torchOn.value = !torchOn.value
+      await track.applyConstraints({
+        advanced: [{ torch: torchOn.value }],
+      })
+    }
+  } catch (_) {}
 }
 
 function closeCamera() {
@@ -150,6 +174,7 @@ function stopStream() {
     stream = null
   }
   cameraReady.value = false
+  torchOn.value = false
 }
 
 // ── Shutter: Capture Frame & Decode Barcode ─────────────────────────────────
@@ -249,7 +274,7 @@ async function fetchProduct(barcode) {
   error.value = ''
   product.value = null
   isFetchingProduct.value = true
-  mobileView.value = 'product'
+  currentTab.value = 'register'
 
   try {
     const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`)
@@ -280,11 +305,9 @@ async function fetchProduct(barcode) {
         price: savedPrice,
         barcode,
       }
-      mobileView.value = 'manual'
     }
   } catch (e) {
     error.value = `Open Food Facts API error: ${e.message}`
-    mobileView.value = 'scan'
   } finally {
     isFetchingProduct.value = false
   }
@@ -295,7 +318,6 @@ function addScannedProductToCart() {
   if (!product.value) return
   addItemToCart(product.value)
   product.value = null
-  mobileView.value = 'scan'
 }
 
 function saveManualProduct() {
@@ -311,7 +333,6 @@ function saveManualProduct() {
     price: parseFloat(manualForm.value.price) || 0,
   })
   manualForm.value = { name: '', brand: '', price: 0, barcode: '' }
-  mobileView.value = 'scan'
 }
 
 function addItemToCart(item) {
@@ -388,7 +409,7 @@ function finalizePayment() {
 function closeReceipt() {
   showReceiptModal.value = false
   receiptRecord.value = null
-  mobileView.value = 'scan'
+  currentTab.value = 'register'
 }
 
 function printReceipt() {
@@ -433,34 +454,34 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Desktop Navigation Tabs -->
-        <nav class="nav-tabs">
+        <!-- Desktop Tabs (Visible on PC >= 1024px) -->
+        <nav class="desktop-nav-tabs">
           <button
             class="tab-btn"
-            :class="{ active: activeTab === 'register' }"
-            @click="activeTab = 'register'"
+            :class="{ active: currentTab === 'register' }"
+            @click="currentTab = 'register'"
           >
             <span class="tab-icon">⚡</span> Register
           </button>
           <button
             class="tab-btn"
-            :class="{ active: activeTab === 'history' }"
-            @click="activeTab = 'history'"
+            :class="{ active: currentTab === 'history' }"
+            @click="currentTab = 'history'"
           >
             <span class="tab-icon">📜</span> Sales History ({{ salesHistory.length }})
           </button>
         </nav>
 
-        <!-- Cart Quick Button (Mobile trigger or Quick info) -->
-        <div class="nav-actions">
+        <!-- Mobile Header Quick Cart Trigger -->
+        <div class="mobile-header-cart">
           <button
-            class="mobile-cart-btn"
-            :class="{ 'has-items': cartCount > 0 }"
-            @click="mobileView = mobileView === 'cart' ? 'scan' : 'cart'"
+            class="quick-cart-pill"
+            :class="{ 'has-items': cartCount > 0, active: currentTab === 'cart' }"
+            @click="currentTab = currentTab === 'cart' ? 'register' : 'cart'"
           >
-            <span class="btn-icon">🛍</span>
-            <span class="cart-label">Cart</span>
-            <span class="badge">{{ cartCount }}</span>
+            <span class="pill-icon">🛍</span>
+            <span class="pill-count">{{ cartCount }}</span>
+            <span v-if="cartTotal > 0" class="pill-total">฿{{ cartTotal.toFixed(0) }}</span>
           </button>
         </div>
       </div>
@@ -469,13 +490,16 @@ onUnmounted(() => {
     <!-- ════════════════ MAIN CONTENT AREA ════════════════ -->
     <main class="app-main">
 
-      <!-- ─────── TAB 1: REGISTER (RESPONSIVE SPLIT ON PC) ─────── -->
-      <div v-if="activeTab === 'register'" class="register-layout">
+      <!-- ─────── TAB 1: REGISTER / SCANNER ─────── -->
+      <div
+        v-show="currentTab === 'register' || currentTab === 'cart'"
+        class="register-layout"
+        :class="{ 'mobile-show-cart': currentTab === 'cart' }"
+      >
 
-        <!-- ── LEFT PANE: SCANNER & PRODUCT CONTROLS ── -->
+        <!-- ── LEFT COLUMN: SCANNER & OPERATING CONTROLS ── -->
         <section
           class="pane operation-pane"
-          :class="{ 'mobile-hidden': mobileView === 'cart' }"
           @dragover.prevent="isDragOver = true"
           @dragleave.prevent="isDragOver = false"
           @drop.prevent="handleDrop"
@@ -489,28 +513,24 @@ onUnmounted(() => {
             @change="handleFileSelect"
           />
 
-          <!-- Quick Action Buttons -->
-          <div class="action-bar">
+          <!-- Mobile Touch Action Grid -->
+          <div class="action-grid">
             <button
-              class="primary-btn pulse-glow"
+              class="touch-btn primary"
               :class="{ active: isCameraActive }"
               @click="isCameraActive ? closeCamera() : openCamera()"
             >
-              <span class="btn-icon">📷</span>
-              {{ isCameraActive ? 'Close Camera' : 'Camera Shutter' }}
+              <span class="touch-btn-icon">📷</span>
+              <span class="touch-btn-text">{{ isCameraActive ? 'Close Camera' : 'Camera Shutter' }}</span>
             </button>
 
-            <button class="outline-btn" @click="triggerImageUpload">
-              <span class="btn-icon">🖼</span>
-              Import Image
+            <button class="touch-btn outline" @click="triggerImageUpload">
+              <span class="touch-btn-icon">🖼</span>
+              <span class="touch-btn-text">Import Image</span>
             </button>
-
-            <div class="drag-hint hidden-mobile">
-              <span>or drag & drop barcode image here</span>
-            </div>
           </div>
 
-          <!-- Manual Barcode Search Input -->
+          <!-- Manual Barcode Search Box -->
           <div class="barcode-search-box">
             <div class="search-input-wrapper">
               <span class="search-icon">🔍</span>
@@ -519,7 +539,7 @@ onUnmounted(() => {
                 type="text"
                 inputmode="numeric"
                 class="search-input"
-                placeholder="Scan or enter barcode (e.g. 051111407592)"
+                placeholder="Scan or enter barcode"
                 @keyup.enter="submitManualBarcode"
               />
               <button
@@ -534,11 +554,11 @@ onUnmounted(() => {
 
           <!-- Alert / Error message -->
           <div v-if="error" class="alert-banner error">
-            <span>⚠ {{ error }}</span>
+            <span class="alert-text">⚠ {{ error }}</span>
             <button class="close-alert" @click="error = ''">✕</button>
           </div>
 
-          <!-- Dropzone overlay when dragging -->
+          <!-- Dropzone overlay when dragging on desktop -->
           <div v-if="isDragOver" class="drop-overlay">
             <div class="drop-card">
               <span class="drop-icon">📥</span>
@@ -548,9 +568,24 @@ onUnmounted(() => {
 
           <!-- ── LIVE CAMERA VIEW WITH SHUTTER ── -->
           <div v-if="isCameraActive" class="camera-card">
+            <!-- Camera Top Bar -->
             <div class="camera-header">
-              <span class="status-indicator live">● LIVE CAMERA</span>
-              <button class="close-btn" @click="closeCamera">✕</button>
+              <div class="camera-status">
+                <span class="status-dot"></span>
+                <span class="status-label">CAMERA ACTIVE</span>
+              </div>
+              <div class="camera-header-actions">
+                <button
+                  v-if="torchAvailable"
+                  class="cam-tool-btn"
+                  :class="{ on: torchOn }"
+                  title="Toggle Flash"
+                  @click="toggleTorch"
+                >
+                  ⚡ {{ torchOn ? 'Flash ON' : 'Flash' }}
+                </button>
+                <button class="cam-close-btn" @click="closeCamera">✕</button>
+              </div>
             </div>
 
             <!-- Viewfinder Mode -->
@@ -563,10 +598,10 @@ onUnmounted(() => {
                 <div class="corner corner-br"></div>
                 <div class="aim-line"></div>
               </div>
-              <p class="guide-text">Position barcode in frame and press Shutter</p>
+              <p class="guide-text">Align barcode in frame, then tap Shutter</p>
 
-              <!-- Camera Controls -->
-              <div class="camera-footer">
+              <!-- Camera Bottom Controls (Shutter Button) -->
+              <div class="camera-controls-bar">
                 <button
                   class="shutter-trigger"
                   :disabled="!cameraReady || decoding"
@@ -586,7 +621,7 @@ onUnmounted(() => {
                 <img :src="capturedDataUrl" class="snapshot-image" alt="Captured Frame" />
                 <div v-if="decoding" class="decoding-scrim">
                   <div class="spinner"></div>
-                  <p>Analyzing barcode from snapshot...</p>
+                  <p>Analyzing barcode...</p>
                 </div>
               </div>
 
@@ -595,9 +630,9 @@ onUnmounted(() => {
               </div>
 
               <div v-if="!decoding" class="snapshot-actions">
-                <button class="primary-btn" @click="retake">📷 Retake</button>
-                <button class="outline-btn" @click="triggerImageUpload">🖼 Use File</button>
-                <button class="secondary-btn" @click="closeCamera">Cancel</button>
+                <button class="touch-btn primary" @click="retake">📷 Retake</button>
+                <button class="touch-btn outline" @click="triggerImageUpload">🖼 Use Image</button>
+                <button class="touch-btn secondary" @click="closeCamera">Cancel</button>
               </div>
             </div>
           </div>
@@ -605,8 +640,8 @@ onUnmounted(() => {
           <!-- ── LOADING SPINNER (API Call) ── -->
           <div v-if="isFetchingProduct" class="loading-card">
             <div class="spinner large"></div>
-            <h3>Connecting to Open Food Facts...</h3>
-            <p class="muted">Retrieving nutritional metadata and product image</p>
+            <h3>Looking up product...</h3>
+            <p class="muted">Fetching details from Open Food Facts</p>
           </div>
 
           <!-- ── PRODUCT DETAIL CARD (Scanned Result) ── -->
@@ -666,19 +701,19 @@ onUnmounted(() => {
                   </div>
                 </div>
 
-                <!-- Action Button -->
+                <!-- Action Buttons -->
                 <div class="product-actions">
-                  <button class="primary-btn btn-full" @click="addScannedProductToCart">
+                  <button class="touch-btn primary flex-1" @click="addScannedProductToCart">
                     ＋ Add to Cart
                   </button>
-                  <button class="secondary-btn" @click="product = null">Dismiss</button>
+                  <button class="touch-btn secondary" @click="product = null">Dismiss</button>
                 </div>
               </div>
             </div>
           </div>
 
           <!-- ── MANUAL PRODUCT FORM (Barcode not in OFF) ── -->
-          <div v-if="mobileView === 'manual' && !product && !isFetchingProduct" class="manual-product-card">
+          <div v-if="manualForm.barcode && !product && !isFetchingProduct" class="manual-product-card">
             <div class="manual-header">
               <span class="notice-icon">📋</span>
               <div>
@@ -725,42 +760,38 @@ onUnmounted(() => {
 
             <div class="form-actions">
               <button
-                class="primary-btn"
+                class="touch-btn primary flex-1"
                 :disabled="!manualForm.name.trim()"
                 @click="saveManualProduct"
               >
                 Save & Add to Cart
               </button>
-              <button class="secondary-btn" @click="mobileView = 'scan'">Cancel</button>
+              <button class="touch-btn secondary" @click="manualForm.barcode = ''">Cancel</button>
             </div>
           </div>
 
           <!-- Empty State / Helpful Quick Guide (when idle) -->
-          <div v-if="!isCameraActive && !product && !isFetchingProduct && mobileView !== 'manual'" class="scanner-hero">
+          <div v-if="!isCameraActive && !product && !isFetchingProduct && !manualForm.barcode" class="scanner-hero">
             <div class="hero-icon-cluster">
               <span class="cluster-icon">📷</span>
               <span class="cluster-icon">🖼</span>
-              <span class="cluster-icon">⌨</span>
+              <span class="cluster-icon">⚡</span>
             </div>
             <h3>Ready to Scan</h3>
             <p class="hero-desc">
-              Use the camera shutter, import a barcode screenshot or photo, or enter a barcode manually to fetch product details from Open Food Facts.
+              Tap <strong>Camera Shutter</strong> to scan with your phone, import a barcode image from photos, or enter a number directly.
             </p>
             <div class="feature-pills">
-              <span class="pill">EAN-13 / EAN-8</span>
               <span class="pill">UPC-A / UPC-E</span>
+              <span class="pill">EAN-13 / EAN-8</span>
               <span class="pill">Code 128</span>
               <span class="pill">QR Code</span>
-              <span class="pill">PromptPay Ready</span>
             </div>
           </div>
         </section>
 
-        <!-- ── RIGHT PANE: DESKTOP TICKET & CART (ALWAYS VISIBLE ON PC) ── -->
-        <aside
-          class="pane cart-pane"
-          :class="{ 'mobile-active': mobileView === 'cart' }"
-        >
+        <!-- ── RIGHT COLUMN: DESKTOP TICKET & MOBILE CART VIEW ── -->
+        <aside class="pane cart-pane">
           <div class="cart-card">
             <!-- Cart Header -->
             <div class="cart-card-header">
@@ -780,10 +811,10 @@ onUnmounted(() => {
                   Clear All
                 </button>
                 <button
-                  class="mobile-close-cart-btn"
-                  @click="mobileView = 'scan'"
+                  class="mobile-back-to-scan-btn"
+                  @click="currentTab = 'register'"
                 >
-                  ✕ Close
+                  ‹ Back to Scan
                 </button>
               </div>
             </div>
@@ -792,8 +823,11 @@ onUnmounted(() => {
             <div class="cart-items-wrapper">
               <div v-if="cart.length === 0" class="empty-cart-state">
                 <span class="empty-icon">🛒</span>
-                <p class="empty-title">Cart is currently empty</p>
-                <p class="muted">Scanned products will automatically show up on this ticket.</p>
+                <p class="empty-title">Your cart is empty</p>
+                <p class="muted">Scanned products will show up here.</p>
+                <button class="touch-btn primary mobile-only-btn mt-3" @click="currentTab = 'register'; openCamera()">
+                  📷 Open Camera Scanner
+                </button>
               </div>
 
               <ul v-else class="cart-list">
@@ -814,11 +848,13 @@ onUnmounted(() => {
 
                   <div class="item-main">
                     <h4 class="item-name" :title="item.name">{{ item.name }}</h4>
-                    <span class="item-barcode mono">{{ item.barcode }}</span>
-                    <span class="item-unit-price">฿{{ item.price.toFixed(2) }} ea</span>
+                    <div class="item-sub-info">
+                      <span class="item-unit-price">฿{{ item.price.toFixed(2) }}</span>
+                      <span class="item-barcode mono">{{ item.barcode }}</span>
+                    </div>
                   </div>
 
-                  <!-- Quantity Controls -->
+                  <!-- Quantity Stepper -->
                   <div class="qty-stepper">
                     <button class="step-btn" @click="changeQty(item.barcode, -1)">−</button>
                     <span class="qty-display">{{ item.qty }}</span>
@@ -871,72 +907,96 @@ onUnmounted(() => {
       </div>
 
       <!-- ─────── TAB 2: SALES HISTORY ─────── -->
-      <div v-if="activeTab === 'history'" class="history-layout">
+      <div v-show="currentTab === 'history'" class="history-layout">
         <div class="history-card">
           <div class="history-header">
             <div>
-              <h2>Sales & Transaction History</h2>
-              <p class="muted">Recorded sales stored locally in your browser</p>
+              <h2>Sales & History</h2>
+              <p class="muted">Recorded transactions in this browser</p>
             </div>
             <button
               v-if="salesHistory.length > 0"
-              class="outline-btn danger"
+              class="touch-btn outline danger-btn"
               @click="salesHistory = []"
             >
-              Clear History
+              Clear
             </button>
           </div>
 
           <div v-if="salesHistory.length === 0" class="empty-history">
             <span class="history-empty-icon">📜</span>
             <p>No transaction history recorded yet.</p>
-            <button class="primary-btn mt-4" @click="activeTab = 'register'">
-              Go to Register
+            <button class="touch-btn primary mt-3" @click="currentTab = 'register'">
+              Back to Register
             </button>
           </div>
 
-          <div v-else class="history-table-wrapper">
-            <table class="history-table">
-              <thead>
-                <tr>
-                  <th>Receipt #</th>
-                  <th>Date & Time</th>
-                  <th>Method</th>
-                  <th>Items</th>
-                  <th>Total</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="sale in salesHistory" :key="sale.id">
-                  <td class="mono font-bold">{{ sale.id }}</td>
-                  <td>{{ sale.formattedDate }}</td>
-                  <td>
-                    <span class="method-tag" :class="sale.method">
-                      {{ sale.method === 'cash' ? '💵 Cash' : sale.method === 'card' ? '💳 Card' : '📲 PromptPay' }}
-                    </span>
-                  </td>
-                  <td>{{ sale.items.reduce((s, i) => s + i.qty, 0) }} items</td>
-                  <td class="font-bold highlight">฿{{ sale.total.toFixed(2) }}</td>
-                  <td>
-                    <button
-                      class="view-receipt-btn"
-                      @click="receiptRecord = sale; showReceiptModal = true"
-                    >
-                      View Receipt
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div v-else class="history-list-mobile">
+            <!-- Mobile Friendly History Cards -->
+            <div
+              v-for="sale in salesHistory"
+              :key="sale.id"
+              class="history-item-card"
+              @click="receiptRecord = sale; showReceiptModal = true"
+            >
+              <div class="history-card-top">
+                <span class="mono font-bold">{{ sale.id }}</span>
+                <span class="method-tag" :class="sale.method">
+                  {{ sale.method === 'cash' ? '💵 Cash' : sale.method === 'card' ? '💳 Card' : '📲 PromptPay' }}
+                </span>
+              </div>
+              <div class="history-card-mid">
+                <span class="muted text-sm">{{ sale.formattedDate }}</span>
+                <span class="item-count-text">{{ sale.items.reduce((s, i) => s + i.qty, 0) }} items</span>
+              </div>
+              <div class="history-card-bot">
+                <span class="text-sm">Total</span>
+                <span class="history-total-amt">฿{{ sale.total.toFixed(2) }}</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </main>
 
-    <!-- ════════════════ PAYMENT MODAL ════════════════ -->
+    <!-- ════════════════ MOBILE BOTTOM NAVIGATION BAR ════════════════ -->
+    <nav class="mobile-bottom-nav">
+      <button
+        class="bottom-nav-item"
+        :class="{ active: currentTab === 'register' }"
+        @click="currentTab = 'register'"
+      >
+        <span class="bottom-icon">⚡</span>
+        <span class="bottom-label">Register</span>
+      </button>
+
+      <button
+        class="bottom-nav-item"
+        :class="{ active: currentTab === 'cart' }"
+        @click="currentTab = 'cart'"
+      >
+        <div class="icon-badge-wrapper">
+          <span class="bottom-icon">🛍</span>
+          <span v-if="cartCount > 0" class="bottom-badge">{{ cartCount }}</span>
+        </div>
+        <span class="bottom-label">Cart</span>
+      </button>
+
+      <button
+        class="bottom-nav-item"
+        :class="{ active: currentTab === 'history' }"
+        @click="currentTab = 'history'"
+      >
+        <span class="bottom-icon">📜</span>
+        <span class="bottom-label">History</span>
+      </button>
+    </nav>
+
+    <!-- ════════════════ PAYMENT MODAL (BOTTOM SHEET ON MOBILE) ════════════════ -->
     <div v-if="showPaymentModal" class="modal-backdrop" @click.self="showPaymentModal = false">
       <div class="modal-card payment-modal">
+        <div class="modal-sheet-handle mobile-only"></div>
+
         <div class="modal-header">
           <h3>Payment Checkout</h3>
           <button class="modal-close-btn" @click="showPaymentModal = false">✕</button>
@@ -965,7 +1025,7 @@ onUnmounted(() => {
               @click="payMethod = 'promptpay'"
             >
               <span class="method-icon">📲</span>
-              <span class="method-name">PromptPay QR</span>
+              <span class="method-name">PromptPay</span>
             </button>
             <button
               class="method-btn"
@@ -1020,7 +1080,7 @@ onUnmounted(() => {
                   class="qr-image"
                 />
               </div>
-              <p class="qr-hint">Scan with any Thai Banking App</p>
+              <p class="qr-hint">Scan with any Mobile Banking App</p>
               <span class="qr-amount">฿{{ cartTotal.toFixed(2) }}</span>
             </div>
           </div>
@@ -1029,16 +1089,16 @@ onUnmounted(() => {
           <div v-if="payMethod === 'card'" class="card-section">
             <div class="card-terminal-mock">
               <span class="terminal-icon">💳</span>
-              <h4>Tap, Insert, or Swipe Card</h4>
-              <p class="muted">Ready on POS terminal for ฿{{ cartTotal.toFixed(2) }}</p>
+              <h4>Tap or Insert Card</h4>
+              <p class="muted">Amount: ฿{{ cartTotal.toFixed(2) }}</p>
             </div>
           </div>
         </div>
 
         <div class="modal-footer">
-          <button class="secondary-btn" @click="showPaymentModal = false">Cancel</button>
+          <button class="touch-btn secondary" @click="showPaymentModal = false">Cancel</button>
           <button
-            class="primary-btn btn-lg"
+            class="touch-btn primary flex-1"
             :disabled="!canCompletePayment"
             @click="finalizePayment"
           >
@@ -1051,8 +1111,10 @@ onUnmounted(() => {
     <!-- ════════════════ RECEIPT MODAL ════════════════ -->
     <div v-if="showReceiptModal && receiptRecord" class="modal-backdrop" @click.self="closeReceipt">
       <div class="modal-card receipt-modal">
+        <div class="modal-sheet-handle mobile-only"></div>
+
         <div class="modal-header no-print">
-          <h3>Transaction Receipt</h3>
+          <h3>Receipt</h3>
           <button class="modal-close-btn" @click="closeReceipt">✕</button>
         </div>
 
@@ -1117,13 +1179,13 @@ onUnmounted(() => {
 
           <div class="receipt-footer">
             <p>Thank you for shopping with us!</p>
-            <p>Open Food Facts Database Verified</p>
+            <p>Verified with Open Food Facts</p>
           </div>
         </div>
 
         <div class="modal-footer no-print">
-          <button class="outline-btn" @click="printReceipt">🖨 Print Receipt</button>
-          <button class="primary-btn" @click="closeReceipt">New Sale ＋</button>
+          <button class="touch-btn outline flex-1" @click="printReceipt">🖨 Print</button>
+          <button class="touch-btn primary flex-1" @click="closeReceipt">New Sale ＋</button>
         </div>
       </div>
     </div>
@@ -1138,20 +1200,6 @@ onUnmounted(() => {
 
 <style scoped>
 /* ─────────────────────────── COLOR SYSTEM & BASE ─────────────────────────── */
-:root {
-  --bg-main: #0b1120;
-  --bg-card: #151f32;
-  --bg-card-hover: #1e293b;
-  --bg-input: #0f172a;
-  --accent-cyan: #38bdf8;
-  --accent-blue: #6366f1;
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --border: #334155;
-  --success: #10b981;
-  --danger: #ef4444;
-}
-
 .pos-app {
   display: flex;
   flex-direction: column;
@@ -1160,62 +1208,94 @@ onUnmounted(() => {
   background-color: #0b1120;
   color: #f8fafc;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  overflow-x: hidden;
+  padding-bottom: calc(64px + env(safe-area-inset-bottom, 16px));
+}
+
+@media (min-width: 1024px) {
+  .pos-app {
+    padding-bottom: 0;
+  }
 }
 
 /* ─────────────────────────── TOP NAVIGATION ─────────────────────────── */
 .app-nav {
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: 40;
   width: 100%;
-  background: rgba(15, 23, 42, 0.85);
+  background: rgba(15, 23, 42, 0.92);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid #334155;
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 .nav-container {
   max-width: 1600px;
   margin: 0 auto;
-  padding: 0.75rem 1.25rem;
+  padding: 0.65rem 1rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
+  min-width: 0;
 }
 
 .brand-logo {
-  font-size: 1.75rem;
+  font-size: 1.6rem;
+  flex-shrink: 0;
+}
+
+.brand-text {
+  min-width: 0;
 }
 
 .brand-title {
-  font-size: 1.25rem;
+  font-size: 1.15rem;
   font-weight: 800;
   letter-spacing: -0.025em;
   background: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .brand-tag {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: #94a3b8;
-  display: block;
+  display: none;
 }
 
-.nav-tabs {
-  display: flex;
+@media (min-width: 640px) {
+  .brand-tag {
+    display: block;
+  }
+}
+
+/* Desktop navigation tabs in top header */
+.desktop-nav-tabs {
+  display: none;
   align-items: center;
   gap: 0.5rem;
   background: #1e293b;
   padding: 0.25rem;
   border-radius: 12px;
+}
+
+@media (min-width: 1024px) {
+  .desktop-nav-tabs {
+    display: flex;
+  }
+  .mobile-header-cart {
+    display: none;
+  }
 }
 
 .tab-btn {
@@ -1238,63 +1318,103 @@ onUnmounted(() => {
   color: #0f172a;
 }
 
-.nav-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.mobile-cart-btn {
+/* Mobile Quick Cart Pill in Header */
+.quick-cart-pill {
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
-  padding: 0.5rem 0.9rem;
-  border-radius: 12px;
-  font-size: 0.9rem;
-  font-weight: 600;
+  padding: 0.4rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.85rem;
+  font-weight: 700;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
   transition: all 0.2s ease;
 }
 
-.mobile-cart-btn.has-items {
+.quick-cart-pill.has-items {
   border-color: #38bdf8;
   background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
 }
 
-.badge {
+.quick-cart-pill.active {
+  background: #38bdf8;
+  color: #0f172a;
+}
+
+.pill-count {
   background: #38bdf8;
   color: #0f172a;
   border-radius: 9999px;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 800;
-  padding: 0.1rem 0.5rem;
+  padding: 0.05rem 0.4rem;
 }
 
-/* ─────────────────────────── MAIN LAYOUT ─────────────────────────── */
+.quick-cart-pill.active .pill-count {
+  background: #0f172a;
+  color: #38bdf8;
+}
+
+.pill-total {
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+/* ─────────────────────────── MAIN CONTENT ─────────────────────────── */
 .app-main {
   flex: 1;
   max-width: 1600px;
   width: 100%;
   margin: 0 auto;
-  padding: 1.25rem;
+  padding: 0.75rem;
 }
 
-/* ── PC DUAL-PANE SPLIT ── */
+@media (min-width: 640px) {
+  .app-main {
+    padding: 1.25rem;
+  }
+}
+
+/* ── LAYOUT SWITCHING (PHONE VS PC) ── */
 .register-layout {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1.5rem;
-  align-items: start;
+  gap: 1rem;
+}
+
+@media (max-width: 1023px) {
+  /* On mobile: show scanner by default, hide cart */
+  .cart-pane {
+    display: none;
+  }
+
+  /* When currentTab === 'cart', hide scanner and show cart */
+  .register-layout.mobile-show-cart .operation-pane {
+    display: none;
+  }
+  .register-layout.mobile-show-cart .cart-pane {
+    display: flex;
+  }
 }
 
 @media (min-width: 1024px) {
+  /* On PC: side-by-side dual-pane */
   .register-layout {
-    grid-template-columns: 1.25fr 0.95fr;
+    grid-template-columns: 1.2fr 0.9fr;
+    gap: 1.5rem;
+    align-items: start;
   }
-  .mobile-close-cart-btn {
+  .cart-pane {
+    display: flex !important;
+  }
+  .operation-pane {
+    display: flex !important;
+  }
+  .mobile-back-to-scan-btn {
     display: none !important;
   }
 }
@@ -1302,25 +1422,75 @@ onUnmounted(() => {
 .pane {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1rem;
   width: 100%;
 }
 
-/* ─────────────────────────── OPERATION PANE CONTROLS ─────────────────────────── */
-.action-bar {
-  display: flex;
-  align-items: center;
+/* ─────────────────────────── ACTION BUTTONS (MOBILE-FIRST) ─────────────────────────── */
+.action-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
-  flex-wrap: wrap;
+  width: 100%;
 }
 
-.drag-hint {
-  font-size: 0.8rem;
-  color: #64748b;
-  margin-left: auto;
+.touch-btn {
+  border: none;
+  border-radius: 14px;
+  padding: 0.75rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  transition: all 0.15s ease;
+  min-height: 48px; /* Touch ergonomics */
+  text-align: center;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-/* ── Barcode Search Box ── */
+.touch-btn:active {
+  transform: scale(0.97);
+}
+
+.touch-btn.primary {
+  background: linear-gradient(135deg, #38bdf8 0%, #6366f1 100%);
+  color: #0f172a;
+  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+}
+
+.touch-btn.primary.active {
+  background: #ef4444;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35);
+}
+
+.touch-btn.outline {
+  background: #151f32;
+  border: 1.5px solid #38bdf8;
+  color: #38bdf8;
+}
+
+.touch-btn.secondary {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+}
+
+.touch-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+/* ─────────────────────────── BARCODE SEARCH INPUT ─────────────────────────── */
 .barcode-search-box {
   width: 100%;
 }
@@ -1331,7 +1501,7 @@ onUnmounted(() => {
   background: #151f32;
   border: 1px solid #334155;
   border-radius: 14px;
-  padding: 0.35rem 0.5rem 0.35rem 1rem;
+  padding: 0.25rem 0.35rem 0.25rem 0.85rem;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -1343,7 +1513,7 @@ onUnmounted(() => {
 .search-icon {
   font-size: 1.1rem;
   color: #94a3b8;
-  margin-right: 0.5rem;
+  margin-right: 0.4rem;
 }
 
 .search-input {
@@ -1352,19 +1522,22 @@ onUnmounted(() => {
   border: none;
   outline: none;
   color: #f8fafc;
-  font-size: 1rem;
+  font-size: 16px; /* 16px prevents iOS Safari auto-zoom on focus! */
   font-family: monospace;
+  min-width: 0;
 }
 
 .search-submit-btn {
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
-  padding: 0.5rem 1.1rem;
+  padding: 0.6rem 1rem;
   border-radius: 10px;
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 0.85rem;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
 .search-submit-btn:hover:not(:disabled) {
@@ -1377,7 +1550,7 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
-/* ─────────────────────────── CAMERA VIEW WITH SHUTTER ─────────────────────────── */
+/* ─────────────────────────── MOBILE OPTIMIZED CAMERA ─────────────────────────── */
 .camera-card {
   background: #000;
   border: 1px solid #334155;
@@ -1392,29 +1565,80 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1.25rem;
+  padding: 0.75rem 1rem;
   background: #151f32;
   border-bottom: 1px solid #1e293b;
 }
 
-.status-indicator.live {
+.camera-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: #ef4444;
+  animation: pulse 1.5s infinite;
+}
+
+.status-label {
   font-size: 0.75rem;
   font-weight: 800;
   color: #ef4444;
   letter-spacing: 0.05em;
-  animation: pulse 1.5s infinite;
+}
+
+.camera-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cam-tool-btn {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  padding: 0.3rem 0.65rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cam-tool-btn.on {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: #0f172a;
+}
+
+.cam-close-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 1.25rem;
+  cursor: pointer;
+  padding: 0 0.25rem;
 }
 
 .viewfinder-container {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  max-height: 480px;
+  aspect-ratio: 4 / 3;
+  max-height: 60vh;
   background: #000;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
+}
+
+@media (min-width: 640px) {
+  .viewfinder-container {
+    aspect-ratio: 16 / 10;
+  }
 }
 
 .video-feed {
@@ -1425,16 +1649,16 @@ onUnmounted(() => {
 
 .scanner-guide {
   position: absolute;
-  width: 70%;
-  max-width: 320px;
+  width: 75%;
+  max-width: 300px;
   height: 55%;
   pointer-events: none;
 }
 
 .corner {
   position: absolute;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border: 3px solid #38bdf8;
 }
 
@@ -1446,25 +1670,26 @@ onUnmounted(() => {
 .aim-line {
   position: absolute;
   top: 50%;
-  left: 5%;
-  right: 5%;
+  left: 4%;
+  right: 4%;
   height: 2px;
-  background: rgba(56, 189, 248, 0.85);
-  box-shadow: 0 0 8px #38bdf8;
+  background: rgba(56, 189, 248, 0.9);
+  box-shadow: 0 0 10px #38bdf8;
 }
 
 .guide-text {
   position: absolute;
-  bottom: 85px;
+  bottom: 84px;
   width: 100%;
   text-align: center;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: #f8fafc;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9);
   pointer-events: none;
+  padding: 0 1rem;
 }
 
-.camera-footer {
+.camera-controls-bar {
   position: absolute;
   bottom: 12px;
   width: 100%;
@@ -1473,44 +1698,41 @@ onUnmounted(() => {
   align-items: center;
 }
 
-/* ── Shutter Button ── */
+/* Big Mobile Touch Shutter Button */
 .shutter-trigger {
   background: none;
   border: none;
   cursor: pointer;
   padding: 0;
   transition: transform 0.15s ease;
-}
-
-.shutter-trigger:hover:not(:disabled) {
-  transform: scale(1.05);
+  -webkit-tap-highlight-color: transparent;
 }
 
 .shutter-trigger:active:not(:disabled) {
-  transform: scale(0.92);
+  transform: scale(0.9);
 }
 
 .shutter-ring {
-  width: 68px;
-  height: 68px;
+  width: 72px;
+  height: 72px;
   border-radius: 9999px;
   border: 4px solid #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 20px rgba(56, 189, 248, 0.5);
+  box-shadow: 0 0 25px rgba(56, 189, 248, 0.55);
 }
 
 .shutter-dot {
-  width: 50px;
-  height: 50px;
+  width: 54px;
+  height: 54px;
   border-radius: 9999px;
   background: linear-gradient(135deg, #38bdf8, #818cf8);
 }
 
 /* ── Snapshot Preview Screen ── */
 .snapshot-container {
-  padding: 1.25rem;
+  padding: 1rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -1521,7 +1743,7 @@ onUnmounted(() => {
 .snapshot-view {
   position: relative;
   width: 100%;
-  max-width: 480px;
+  max-width: 440px;
   border-radius: 14px;
   overflow: hidden;
   background: #000;
@@ -1547,16 +1769,16 @@ onUnmounted(() => {
 
 .scan-error-msg {
   color: #ef4444;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   text-align: center;
-  max-width: 420px;
+  max-width: 400px;
 }
 
 .snapshot-actions {
   display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 440px;
 }
 
 /* ─────────────────────────── PRODUCT PREVIEW CARD ─────────────────────────── */
@@ -1573,30 +1795,30 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1.25rem;
+  padding: 0.75rem 1rem;
   background: #1e293b;
   border-bottom: 1px solid #334155;
 }
 
 .found-badge {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: #10b981;
 }
 
 .barcode-chip {
   background: #0f172a;
-  padding: 0.2rem 0.6rem;
+  padding: 0.2rem 0.5rem;
   border-radius: 6px;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: #38bdf8;
 }
 
 .product-body {
-  padding: 1.25rem;
+  padding: 1rem;
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1rem;
 }
 
 @media (min-width: 640px) {
@@ -1608,17 +1830,17 @@ onUnmounted(() => {
 .product-media {
   flex-shrink: 0;
   width: 100%;
-  max-width: 180px;
+  max-width: 160px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .product-image {
   width: 100%;
-  height: 160px;
+  height: 140px;
   object-fit: contain;
   background: #ffffff;
   border-radius: 12px;
@@ -1627,18 +1849,18 @@ onUnmounted(() => {
 
 .product-image-fallback {
   width: 100%;
-  height: 160px;
+  height: 140px;
   background: #1e293b;
   border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 4rem;
+  font-size: 3.5rem;
 }
 
 .nutri-tag {
   font-size: 0.75rem;
-  padding: 0.25rem 0.65rem;
+  padding: 0.2rem 0.6rem;
   border-radius: 9999px;
   color: #ffffff;
   font-weight: 600;
@@ -1653,11 +1875,11 @@ onUnmounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
 
 .product-title {
-  font-size: 1.35rem;
+  font-size: 1.15rem;
   font-weight: 700;
   color: #f8fafc;
   line-height: 1.3;
@@ -1666,28 +1888,33 @@ onUnmounted(() => {
 .product-meta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
-  font-size: 0.85rem;
+  gap: 0.5rem 0.75rem;
+  font-size: 0.8rem;
   color: #94a3b8;
 }
 
 .price-edit-box {
-  margin-top: 0.5rem;
-  padding: 0.9rem;
+  margin-top: 0.35rem;
+  padding: 0.75rem;
   background: #0f172a;
   border: 1px solid #334155;
   border-radius: 12px;
+}
+
+.input-label {
+  font-size: 0.78rem;
+  color: #94a3b8;
 }
 
 .price-input-row {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  margin: 0.4rem 0;
+  margin: 0.3rem 0;
 }
 
 .currency-prefix {
-  font-size: 1.3rem;
+  font-size: 1.2rem;
   font-weight: 800;
   color: #38bdf8;
 }
@@ -1697,34 +1924,35 @@ onUnmounted(() => {
   border: 1px solid #334155;
   border-radius: 8px;
   color: #f8fafc;
-  font-size: 1.3rem;
+  font-size: 1.25rem;
   font-weight: 700;
-  padding: 0.35rem 0.75rem;
-  width: 140px;
+  padding: 0.35rem 0.65rem;
+  width: 130px;
   outline: none;
 }
 
 .quick-price-chips {
   display: flex;
-  gap: 0.4rem;
+  gap: 0.35rem;
   flex-wrap: wrap;
-  margin-top: 0.5rem;
+  margin-top: 0.4rem;
 }
 
 .chip {
   background: #1e293b;
   border: 1px solid #334155;
   color: #cbd5e1;
-  padding: 0.25rem 0.6rem;
-  font-size: 0.75rem;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.72rem;
   font-weight: 600;
   border-radius: 6px;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.chip:hover {
-  background: #334155;
-  color: #38bdf8;
+.chip:active {
+  background: #38bdf8;
+  color: #0f172a;
 }
 
 .chip.reset {
@@ -1733,8 +1961,8 @@ onUnmounted(() => {
 
 .product-actions {
   display: flex;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
 }
 
 /* ─────────────────────────── MANUAL PRODUCT CARD ─────────────────────────── */
@@ -1742,36 +1970,36 @@ onUnmounted(() => {
   background: #151f32;
   border: 1px solid #334155;
   border-radius: 20px;
-  padding: 1.5rem;
+  padding: 1.25rem;
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1rem;
 }
 
 .manual-header {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.65rem;
 }
 
 .notice-icon {
-  font-size: 2rem;
+  font-size: 1.8rem;
 }
 
 .form-grid {
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
+  gap: 0.75rem;
 }
 
 .form-field {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.3rem;
 }
 
 .form-field label {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: #94a3b8;
 }
 
@@ -1780,8 +2008,8 @@ onUnmounted(() => {
   border: 1px solid #334155;
   border-radius: 10px;
   color: #f8fafc;
-  padding: 0.65rem 0.9rem;
-  font-size: 0.95rem;
+  padding: 0.65rem 0.85rem;
+  font-size: 16px; /* Prevents auto-zoom on mobile */
   outline: none;
 }
 
@@ -1791,7 +2019,7 @@ onUnmounted(() => {
 
 .form-actions {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.65rem;
 }
 
 /* ─────────────────────────── SCANNER HERO (IDLE) ─────────────────────────── */
@@ -1799,25 +2027,25 @@ onUnmounted(() => {
   background: #151f32;
   border: 1px dashed #334155;
   border-radius: 20px;
-  padding: 2.5rem 1.5rem;
+  padding: 2rem 1.25rem;
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .hero-icon-cluster {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .cluster-icon {
-  font-size: 2.2rem;
+  font-size: 1.8rem;
   background: #1e293b;
-  width: 54px;
-  height: 54px;
-  border-radius: 16px;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1825,29 +2053,29 @@ onUnmounted(() => {
 
 .hero-desc {
   color: #94a3b8;
-  font-size: 0.95rem;
-  max-width: 480px;
-  line-height: 1.5;
+  font-size: 0.9rem;
+  max-width: 440px;
+  line-height: 1.45;
 }
 
 .feature-pills {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.4rem;
   justify-content: center;
 }
 
 .pill {
   background: #1e293b;
   color: #38bdf8;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  padding: 0.25rem 0.75rem;
+  padding: 0.2rem 0.65rem;
   border-radius: 9999px;
   border: 1px solid #334155;
 }
 
-/* ─────────────────────────── CART PANE & SUMMARY ─────────────────────────── */
+/* ─────────────────────────── CART CARD & TICKET ─────────────────────────── */
 .cart-card {
   background: #151f32;
   border: 1px solid #334155;
@@ -1856,13 +2084,18 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
-  position: sticky;
-  top: 5rem;
-  max-height: calc(100vh - 6rem);
+}
+
+@media (min-width: 1024px) {
+  .cart-card {
+    position: sticky;
+    top: 5rem;
+    max-height: calc(100vh - 6rem);
+  }
 }
 
 .cart-card-header {
-  padding: 1.1rem 1.25rem;
+  padding: 0.85rem 1rem;
   background: #1e293b;
   border-bottom: 1px solid #334155;
   display: flex;
@@ -1873,17 +2106,17 @@ onUnmounted(() => {
 .cart-title-row {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
 
 .cart-heading {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .cart-heading h2 {
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   font-weight: 700;
 }
 
@@ -1891,9 +2124,9 @@ onUnmounted(() => {
   background: #0f172a;
   border: 1px solid #334155;
   color: #38bdf8;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  padding: 0.2rem 0.6rem;
+  padding: 0.15rem 0.5rem;
   border-radius: 9999px;
 }
 
@@ -1903,12 +2136,23 @@ onUnmounted(() => {
   gap: 0.5rem;
 }
 
+.mobile-back-to-scan-btn {
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #38bdf8;
+  padding: 0.35rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .cart-items-wrapper {
   flex: 1;
   overflow-y: auto;
-  padding: 1rem 1.25rem;
-  min-height: 220px;
-  max-height: 380px;
+  padding: 0.85rem 1rem;
+  min-height: 200px;
+  max-height: 420px;
 }
 
 .empty-cart-state {
@@ -1924,12 +2168,12 @@ onUnmounted(() => {
 }
 
 .empty-icon {
-  font-size: 3rem;
+  font-size: 2.8rem;
   opacity: 0.6;
 }
 
 .empty-title {
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 600;
   color: #94a3b8;
 }
@@ -1938,22 +2182,22 @@ onUnmounted(() => {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
 
 .cart-item-row {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.6rem;
   background: #0f172a;
   border: 1px solid #1e293b;
-  border-radius: 14px;
-  padding: 0.75rem 0.9rem;
+  border-radius: 12px;
+  padding: 0.6rem 0.75rem;
 }
 
 .item-img-box {
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
   border-radius: 8px;
   overflow: hidden;
@@ -1970,7 +2214,7 @@ onUnmounted(() => {
 }
 
 .thumb-fallback {
-  font-size: 1.4rem;
+  font-size: 1.25rem;
 }
 
 .item-main {
@@ -1979,7 +2223,7 @@ onUnmounted(() => {
 }
 
 .item-name {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -1987,21 +2231,27 @@ onUnmounted(() => {
   color: #f8fafc;
 }
 
+.item-sub-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .item-barcode {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   color: #64748b;
-  display: block;
 }
 
 .item-unit-price {
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   color: #94a3b8;
+  font-weight: 600;
 }
 
 .qty-stepper {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.25rem;
   background: #1e293b;
   border-radius: 8px;
   padding: 0.15rem;
@@ -2019,17 +2269,17 @@ onUnmounted(() => {
 }
 
 .qty-display {
-  min-width: 20px;
+  min-width: 18px;
   text-align: center;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 700;
 }
 
 .item-subtotal {
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 700;
   color: #38bdf8;
-  min-width: 60px;
+  min-width: 52px;
   text-align: right;
 }
 
@@ -2038,7 +2288,6 @@ onUnmounted(() => {
   border: none;
   cursor: pointer;
   opacity: 0.45;
-  transition: opacity 0.15s;
   padding: 0.2rem;
 }
 
@@ -2048,29 +2297,29 @@ onUnmounted(() => {
 
 /* ── Cart Financial Summary ── */
 .cart-summary-footer {
-  padding: 1.25rem;
+  padding: 1rem;
   background: #111827;
   border-top: 1px solid #334155;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.5rem;
 }
 
 .summary-line {
   display: flex;
   justify-content: space-between;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   color: #94a3b8;
 }
 
 .summary-divider {
   height: 1px;
   background: #334155;
-  margin: 0.2rem 0;
+  margin: 0.15rem 0;
 }
 
 .summary-line.grand-total {
-  font-size: 1.2rem;
+  font-size: 1.15rem;
   font-weight: 800;
   color: #f8fafc;
 }
@@ -2083,17 +2332,18 @@ onUnmounted(() => {
   background: linear-gradient(135deg, #38bdf8 0%, #6366f1 100%);
   border: none;
   color: #0f172a;
-  padding: 0.9rem 1.25rem;
+  padding: 0.85rem 1.1rem;
   border-radius: 12px;
-  font-size: 1.05rem;
-  font-weight: 700;
+  font-size: 1rem;
+  font-weight: 800;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 0.5rem;
+  margin-top: 0.4rem;
   transition: all 0.2s ease;
   box-shadow: 0 4px 14px rgba(56, 189, 248, 0.35);
+  min-height: 48px;
 }
 
 .checkout-submit-btn:disabled {
@@ -2102,12 +2352,151 @@ onUnmounted(() => {
   box-shadow: none;
 }
 
-.checkout-submit-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(56, 189, 248, 0.5);
+/* ─────────────────────────── SALES HISTORY (MOBILE CARDS) ─────────────────────────── */
+.history-layout {
+  width: 100%;
 }
 
-/* ─────────────────────────── MODALS & DIALOGS ─────────────────────────── */
+.history-card {
+  background: #151f32;
+  border: 1px solid #334155;
+  border-radius: 20px;
+  padding: 1.25rem;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.danger-btn {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.history-list-mobile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.history-item-card {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.history-item-card:hover, .history-item-card:active {
+  border-color: #38bdf8;
+}
+
+.history-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.history-card-mid {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.history-card-bot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 0.35rem;
+  border-top: 1px dashed #1e293b;
+}
+
+.history-total-amt {
+  font-weight: 800;
+  font-size: 1.1rem;
+  color: #38bdf8;
+}
+
+.method-tag {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  background: #1e293b;
+  font-weight: 600;
+}
+
+/* ─────────────────────────── MOBILE BOTTOM NAVIGATION BAR ─────────────────────────── */
+.mobile-bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: rgba(15, 23, 42, 0.96);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid #334155;
+  display: flex;
+  justify-content: space-around;
+  padding: 0.45rem 0.5rem calc(0.45rem + env(safe-area-inset-bottom, 8px));
+}
+
+@media (min-width: 1024px) {
+  .mobile-bottom-nav {
+    display: none;
+  }
+}
+
+.bottom-nav-item {
+  flex: 1;
+  background: none;
+  border: none;
+  color: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.3rem 0;
+  transition: all 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bottom-nav-item.active {
+  color: #38bdf8;
+}
+
+.bottom-icon {
+  font-size: 1.35rem;
+}
+
+.icon-badge-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.bottom-badge {
+  position: absolute;
+  top: -4px;
+  right: -10px;
+  background: #38bdf8;
+  color: #0f172a;
+  border-radius: 9999px;
+  font-size: 0.65rem;
+  font-weight: 800;
+  padding: 0.05rem 0.35rem;
+}
+
+/* ─────────────────────────── MODALS & MOBILE BOTTOM SHEETS ─────────────────────────── */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2115,26 +2504,56 @@ onUnmounted(() => {
   backdrop-filter: blur(8px);
   z-index: 100;
   display: flex;
-  align-items: center;
+  align-items: flex-end; /* Slide from bottom on mobile */
   justify-content: center;
-  padding: 1rem;
+  padding: 0;
+}
+
+@media (min-width: 640px) {
+  .modal-backdrop {
+    align-items: center;
+    padding: 1rem;
+  }
 }
 
 .modal-card {
   background: #151f32;
   border: 1px solid #334155;
-  border-radius: 20px;
+  border-radius: 24px 24px 0 0; /* Bottom sheet styling on mobile */
   width: 100%;
   max-width: 520px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.7);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  max-height: 90vh;
+  max-height: 85vh;
+  animation: slideUp 0.25s ease-out;
+}
+
+@media (min-width: 640px) {
+  .modal-card {
+    border-radius: 20px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    max-height: 90vh;
+  }
+}
+
+.modal-sheet-handle {
+  width: 40px;
+  height: 4px;
+  background: #475569;
+  border-radius: 9999px;
+  margin: 0.6rem auto 0.2rem;
+}
+
+@media (min-width: 640px) {
+  .mobile-only {
+    display: none !important;
+  }
 }
 
 .modal-header {
-  padding: 1rem 1.25rem;
+  padding: 0.85rem 1.15rem;
   background: #1e293b;
   border-bottom: 1px solid #334155;
   display: flex;
@@ -2146,25 +2565,26 @@ onUnmounted(() => {
   background: none;
   border: none;
   color: #94a3b8;
-  font-size: 1.2rem;
+  font-size: 1.25rem;
   cursor: pointer;
+  padding: 0.2rem;
 }
 
 .modal-footer {
-  padding: 1rem 1.25rem;
+  padding: 0.85rem 1.15rem;
   background: #111827;
   border-top: 1px solid #334155;
   display: flex;
   justify-content: flex-end;
-  gap: 0.75rem;
+  gap: 0.65rem;
 }
 
-/* ── Payment Modal Content ── */
+/* ── Payment Body ── */
 .payment-body {
-  padding: 1.25rem;
+  padding: 1rem;
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1rem;
   overflow-y: auto;
 }
 
@@ -2172,14 +2592,14 @@ onUnmounted(() => {
   background: #0f172a;
   border: 1px solid #334155;
   border-radius: 14px;
-  padding: 1rem 1.25rem;
+  padding: 0.85rem 1rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
 .callout-value {
-  font-size: 1.6rem;
+  font-size: 1.5rem;
   font-weight: 800;
   color: #38bdf8;
 }
@@ -2187,20 +2607,20 @@ onUnmounted(() => {
 .payment-methods-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .method-btn {
   background: #1e293b;
   border: 2px solid transparent;
   color: #f8fafc;
-  padding: 0.9rem 0.5rem;
+  padding: 0.75rem 0.4rem;
   border-radius: 12px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.35rem;
   transition: all 0.15s ease;
 }
 
@@ -2210,34 +2630,35 @@ onUnmounted(() => {
 }
 
 .method-icon {
-  font-size: 1.6rem;
+  font-size: 1.4rem;
 }
 
 .method-name {
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 700;
 }
 
 .cash-section {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.65rem;
 }
 
 .cash-input-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .field-input.large {
-  font-size: 1.4rem;
+  font-size: 1.35rem;
   font-weight: 700;
+  width: 100%;
 }
 
 .quick-cash-row {
   display: flex;
-  gap: 0.4rem;
+  gap: 0.35rem;
   flex-wrap: wrap;
 }
 
@@ -2245,31 +2666,30 @@ onUnmounted(() => {
   background: #1e293b;
   border: 1px solid #334155;
   color: #f8fafc;
-  padding: 0.35rem 0.75rem;
+  padding: 0.35rem 0.65rem;
   border-radius: 8px;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
 }
 
-.cash-chip:hover {
+.cash-chip:active {
   background: #38bdf8;
   color: #0f172a;
 }
 
 .change-callout {
-  margin-top: 0.5rem;
   background: #0f172a;
   border: 1px solid #334155;
   border-radius: 12px;
-  padding: 0.9rem 1.1rem;
+  padding: 0.75rem 1rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
 .change-amount {
-  font-size: 1.35rem;
+  font-size: 1.25rem;
   font-weight: 800;
   color: #10b981;
 }
@@ -2281,69 +2701,68 @@ onUnmounted(() => {
   background: #0f172a;
   border: 1px solid #334155;
   border-radius: 16px;
-  padding: 1.5rem;
-  gap: 0.75rem;
+  padding: 1.25rem;
+  gap: 0.65rem;
 }
 
 .qr-badge {
   background: #03496b;
   color: #ffffff;
-  padding: 0.2rem 0.8rem;
+  padding: 0.2rem 0.75rem;
   border-radius: 6px;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   font-weight: 800;
-  letter-spacing: 0.05em;
 }
 
 .qr-code-placeholder {
   background: #ffffff;
-  padding: 0.75rem;
+  padding: 0.65rem;
   border-radius: 12px;
 }
 
 .qr-image {
-  width: 160px;
-  height: 160px;
+  width: 140px;
+  height: 140px;
   display: block;
 }
 
 .qr-hint {
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: #94a3b8;
 }
 
 .qr-amount {
-  font-size: 1.4rem;
+  font-size: 1.3rem;
   font-weight: 800;
   color: #38bdf8;
 }
 
 .card-terminal-mock {
   text-align: center;
-  padding: 2.5rem 1.5rem;
+  padding: 2rem 1rem;
   background: #0f172a;
   border: 1px solid #334155;
   border-radius: 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .terminal-icon {
-  font-size: 3rem;
+  font-size: 2.8rem;
 }
 
 /* ─────────────────────────── PAPER RECEIPT ─────────────────────────── */
 .receipt-paper {
   background: #ffffff;
   color: #111827;
-  padding: 1.5rem 1.25rem;
+  padding: 1.25rem 1rem;
   font-family: 'Courier New', Courier, monospace;
-  font-size: 0.875rem;
+  font-size: 0.82rem;
   line-height: 1.4;
   overflow-y: auto;
-  max-height: 60vh;
+  max-height: 55vh;
 }
 
 .receipt-brand {
@@ -2351,23 +2770,21 @@ onUnmounted(() => {
 }
 
 .receipt-brand h2 {
-  font-size: 1.3rem;
+  font-size: 1.2rem;
   font-weight: 900;
-  letter-spacing: 0.05em;
 }
 
 .receipt-separator {
   text-align: center;
-  margin: 0.5rem 0;
-  overflow: hidden;
-  letter-spacing: -0.05em;
+  margin: 0.4rem 0;
   color: #64748b;
+  overflow: hidden;
 }
 
 .receipt-line-item {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.35rem;
 }
 
 .receipt-line-left {
@@ -2380,14 +2797,14 @@ onUnmounted(() => {
 }
 
 .receipt-item-calc {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: #475569;
 }
 
 .receipt-totals {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.2rem;
 }
 
 .receipt-row {
@@ -2396,168 +2813,31 @@ onUnmounted(() => {
 }
 
 .receipt-row.grand-line {
-  font-size: 1.1rem;
+  font-size: 1.05rem;
   font-weight: 900;
-  margin: 0.35rem 0;
+  margin: 0.3rem 0;
   border-top: 1px dashed #111;
   border-bottom: 1px dashed #111;
-  padding: 0.25rem 0;
+  padding: 0.2rem 0;
 }
 
 .receipt-footer {
   text-align: center;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   color: #64748b;
 }
 
-/* ─────────────────────────── SALES HISTORY ─────────────────────────── */
-.history-layout {
-  width: 100%;
-}
-
-.history-card {
-  background: #151f32;
-  border: 1px solid #334155;
-  border-radius: 20px;
-  padding: 1.5rem;
-}
-
-.history-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.25rem;
-}
-
-.history-table-wrapper {
-  overflow-x: auto;
-}
-
-.history-table {
-  width: 100%;
-  border-collapse: collapse;
-  text-align: left;
-  font-size: 0.9rem;
-}
-
-.history-table th {
-  background: #1e293b;
-  padding: 0.75rem 1rem;
-  color: #94a3b8;
-  font-weight: 600;
-}
-
-.history-table td {
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #1e293b;
-}
-
-.method-tag {
-  font-size: 0.75rem;
-  padding: 0.2rem 0.6rem;
-  border-radius: 6px;
-  background: #1e293b;
-  font-weight: 600;
-}
-
-.view-receipt-btn {
-  background: #1e293b;
-  border: 1px solid #334155;
-  color: #38bdf8;
-  padding: 0.35rem 0.75rem;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 0.8rem;
-}
-
-.view-receipt-btn:hover {
-  background: #38bdf8;
-  color: #0f172a;
-}
-
-/* ─────────────────────────── COMMON UTILITIES & BUTTONS ─────────────────────────── */
-.primary-btn {
-  background: linear-gradient(135deg, #38bdf8 0%, #6366f1 100%);
-  border: none;
-  color: #0f172a;
-  padding: 0.65rem 1.4rem;
-  border-radius: 12px;
-  font-size: 0.95rem;
-  font-weight: 700;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  transition: all 0.15s ease;
-}
-
-.primary-btn:hover:not(:disabled) {
-  opacity: 0.95;
-  transform: translateY(-1px);
-}
-
-.primary-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.secondary-btn {
-  background: #1e293b;
-  border: 1px solid #334155;
-  color: #f8fafc;
-  padding: 0.65rem 1.25rem;
-  border-radius: 12px;
-  font-size: 0.95rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.outline-btn {
-  background: transparent;
-  border: 2px solid #38bdf8;
-  color: #38bdf8;
-  padding: 0.6rem 1.25rem;
-  border-radius: 12px;
-  font-size: 0.95rem;
-  font-weight: 700;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.outline-btn:hover {
-  background: rgba(56, 189, 248, 0.1);
-}
-
-.outline-btn.danger {
-  border-color: #ef4444;
-  color: #ef4444;
-}
-
-.btn-full {
-  width: 100%;
-  justify-content: center;
-}
-
+/* ─────────────────────────── UTILITY STYLES ─────────────────────────── */
 .text-btn {
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: #94a3b8;
 }
 
 .text-btn.danger {
   color: #ef4444;
-}
-
-.close-btn {
-  background: none;
-  border: none;
-  color: #94a3b8;
-  font-size: 1.2rem;
-  cursor: pointer;
 }
 
 .mono {
@@ -2566,12 +2846,16 @@ onUnmounted(() => {
 
 .muted {
   color: #94a3b8;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
+}
+
+.text-sm {
+  font-size: 0.78rem;
 }
 
 .spinner {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: 3px solid rgba(255, 255, 255, 0.2);
   border-top-color: #38bdf8;
   border-radius: 50%;
@@ -2579,8 +2863,8 @@ onUnmounted(() => {
 }
 
 .spinner.large {
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   border-width: 4px;
 }
 
@@ -2588,16 +2872,16 @@ onUnmounted(() => {
   background: #151f32;
   border: 1px solid #334155;
   border-radius: 20px;
-  padding: 3rem 1.5rem;
+  padding: 2.5rem 1.25rem;
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .alert-banner {
-  padding: 0.75rem 1rem;
+  padding: 0.65rem 0.85rem;
   border-radius: 12px;
   display: flex;
   align-items: center;
@@ -2636,41 +2920,13 @@ onUnmounted(() => {
 }
 
 .drop-icon {
-  font-size: 3rem;
+  font-size: 2.8rem;
   display: block;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.4rem;
 }
 
-/* ─────────────────────────── RESPONSIVE BREAKPOINTS (PHONE & PC) ─────────────────────────── */
-@media (max-width: 1023px) {
-  /* On Mobile (< 1024px) */
-  .hidden-mobile {
-    display: none !important;
-  }
-
-  .operation-pane.mobile-hidden {
-    display: none !important;
-  }
-
-  .cart-pane:not(.mobile-active) {
-    display: none !important;
-  }
-
-  .cart-card {
-    position: static;
-    max-height: none;
-  }
-
-  .cart-items-wrapper {
-    max-height: 50vh;
-  }
-}
-
-@media (min-width: 1024px) {
-  /* On PC (>= 1024px) */
-  .mobile-cart-btn {
-    display: none !important;
-  }
+.mt-3 {
+  margin-top: 0.75rem;
 }
 
 /* ─────────────────────────── PRINT STYLES ─────────────────────────── */
@@ -2705,7 +2961,12 @@ onUnmounted(() => {
 }
 
 @keyframes slideDown {
-  from { opacity: 0; transform: translateY(-10px); }
+  from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
 }
 </style>
